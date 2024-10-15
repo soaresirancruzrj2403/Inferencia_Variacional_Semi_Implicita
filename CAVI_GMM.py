@@ -1,232 +1,424 @@
 
 import numpy as np
 import scipy as spy
-import pandas as pd
-
-Parametros = np.load('Modelo\\Parametros.npy', allow_pickle = True).item()
+from sklearn.mixture import GaussianMixture
 
 class CAVI_GMM:
 
-    def __init__(self, Dados: np.ndarray, K: int) -> None:
-
+    def __init__(self, Dados: np.ndarray, categorias: int) -> None:
+        
         # Dados observados
         
         self.X = Dados
 
-        # Número de observações
+        #
 
-        self.N = self.X.shape[0]
+        self.N, self.D = self.X.shape
 
-        # Dimensão das observações
+        # Número de categorias latentes
 
-        self.D = self.X.shape[1]
+        self.K = categorias
 
-        # Quantidade de classes latentes
+        #
 
-        self.K = K
+        self.r = np.zeros(shape = (self.N, self.K))
 
-        # Responsabilidade da classe k na observação n
+        # Estatísticas suficientes
 
-        self.r_nk = np.array([])
+        self.N_barra = np.zeros(shape = (self.K))
 
-        # Estatísticas suficientes da classe k
+        self.X_barra = np.zeros(shape = (self.K, self.D))
 
-        self.N_k = np.array([])
+        self.S_barra = np.zeros(shape = (self.K, self.D, self.D))
 
-        self.x_barra_k = np.array([])
+        # Parâmetros a priori
 
-        self.S_k = np.array([])
+        self.alpha_0 = 1/self.K
 
-        # Parâmetros da priori
+        self.kappa_0 = 1e-6
 
-        self.alpha_0 = 1e-3
-
-        self.mu_0 = Parametros['mu']
-
-        self.kappa_0 = 1e-3
+        self.mu_0 = np.zeros(shape = (self.D))
 
         self.nu_0 = self.D
 
-        self.V_0 = np.diag([1e-3]*self.D)
+        self.W_0 = np.cov(self.X.T)
 
-        self.V_inv_0 = np.diag([1e3]*self.D)
+        self.V_0 = np.linalg.inv(self.W_0)
 
-        # Parâmetros da posteriori da classe k
+        # Parâmetros a posteriori
 
-        self.alpha_k = np.array([])
+        self.alpha = np.zeros(shape = (self.K))
 
-        self.E_pi_k = np.array([])
+        self.kappa = np.zeros(shape = (self.K))
 
-        self.nu_k = np.array([])
+        self.m = np.zeros(shape = (self.K, self.D))
 
-        self.kappa_k = np.array([])
+        self.nu = np.zeros(shape = (self.K))
 
-        self.V_inv_k = np.array([])
+        self.W = np.zeros(shape = (self.K, self.D, self.D))
 
-        self.V_k = np.array([])
+        self.V = np.zeros(shape = (self.K, self.D, self.D))
 
-        self.mu_k = np.array([])
+        # Estimadores de Bayes
 
-        # Valor do ELBO em cada iteração
+        self.pi = np.zeros(shape = (self.K))
 
-        self.historico_ELBO = []
+        self.Z = np.zeros(shape = (self.N))
 
-        # Cota inferior do ln da evidência
+        self.mu = np.zeros(shape = (self.K, self.D))
 
-        self.ELBO = 0
+        self.Sigma = np.zeros(shape = (self.K, self.D, self.D))
 
-        # Quantidades importantes para o cálculo de outros valores
+        self.Lambda = np.zeros(shape = (self.K, self.D, self.D))
 
-        self.E_ln_det_Lambda_k = np.array([])
+        #
 
-        self.E_ln_pi_k = np.array([])
+        self.ELBO = []
 
-    def inicializa_params_posteriori(self) -> None:
+    def inicializa_modelo(self) -> None:
 
-        self.alpha_k = np.random.uniform(low = 0, high = self.N, size = self.K)
+        GMM_Inicial = GaussianMixture(n_components = self.K, max_iter = 0)
 
-        self.nu_k = np.random.randint(low = self.D, high = self.N, size = self.K)
+        GMM_Inicial.fit(X = self.X)
 
-        self.kappa_k = np.random.uniform(low = 0, high = self.N, size = self.K)
+        self.r = GMM_Inicial.predict_proba(X = self.X)
 
-        self.V_k = Parametros['Lambda']
-
-        self.V_inv_k = np.linalg.inv(self.V_k)
-
-        self.mu_k = Parametros['mu']
-
-    def atualiz_E_ln_det_Lambda_k(self) -> None:
-
-        self.E_ln_det_Lambda_k = np.add.outer(self.nu_k, -np.arange(self.D))/2
-
-        self.E_ln_det_Lambda_k = spy.special.psi(self.E_ln_det_Lambda_k).sum(1)
-
-        self.E_ln_det_Lambda_k += np.log(np.linalg.det(self.V_k))
-
-        self.E_ln_det_Lambda_k += self.D*np.log(2)
-
-    def atualiza_E_ln_pi_k(self) -> None:
-
-        self.E_ln_pi_k = spy.special.psi(self.alpha_k)
+    def E_ln_det_Lambda(self) -> np.ndarray:
         
-        self.E_ln_pi_k -= spy.special.psi(self.alpha_k.sum())
+        E_ln_det_Lambda = np.add.outer(self.nu, -np.arange(stop = self.D))/2
 
-    def atualiza_r_nk(self) -> None:
+        E_ln_det_Lambda = spy.special.psi(E_ln_det_Lambda).sum(axis = 1)
 
-        self.r_nk = np.zeros((self.N, self.K))
+        E_ln_det_Lambda += self.D*np.log(2)
 
-        for n in range(self.N):
+        E_ln_det_Lambda += np.log(np.linalg.det(self.V))
 
-            for k in range(self.K):
-                
-                self.r_nk[n][k] = (self.X[n] - self.mu_k[k]).T @ self.V_k[k] @ (self.X[n] - self.mu_k[k])
-
-                self.r_nk[n][k] *= -self.nu_k[k]/2
-
-                self.r_nk[n][k] -= self.D/(2*self.kappa_k[k])
-
-        self.r_nk = self.r_nk/np.abs(self.r_nk).max()
-
-        self.r_nk = self.E_ln_pi_k*np.sqrt(self.E_ln_det_Lambda_k)*np.exp(self.r_nk)
-
-        self.r_nk = self.r_nk/self.r_nk.sum(axis = 1)[:, np.newaxis]
-
-    def atualiza_N_k(self) -> None:
-
-        self.N_k = self.r_nk.sum(0)
-
-    def atualiza_x_barra_k(self) -> None:
-
-        self.x_barra_k = self.r_nk.T @ self.X/self.N_k[:, np.newaxis]
+        return E_ln_det_Lambda
     
-    def atualiza_S_k(self) -> None:
+    def E_ln_pi(self) -> np.ndarray:
 
-        self.S_k = np.zeros((self.K, self.D, self.D))
+        E_ln_pi = spy.special.psi(self.alpha)
+
+        E_ln_pi -= spy.special.psi(self.alpha.sum())
+
+        return E_ln_pi
+    
+    def atualiza_N_barra(self) -> None:
+        
+        self.N_barra = self.r.sum(axis = 0)
+
+    def atualiza_X_barra(self) -> None:
+
+        self.X_barra = self.r.T @ self.X
+
+        self.X_barra /= self.N_barra.reshape((self.K, 1))
+
+    def atualiza_S_barra(self) -> None:
 
         for k in range(self.K):
-                
+
+            S_k = 0
+
             for n in range(self.N):
 
-                self.S_k[k] += self.r_nk[n][k]*(self.X[n] - self.x_barra_k[k])[:, np.newaxis] @ (self.X[n] - self.x_barra_k[k])[:, np.newaxis].T
-                    
-                self.S_k[k] /= self.N_k[k]
+                S_nk = self.X[n] - self.X_barra[k]
 
-    def atualiza_alpha_k(self) -> None:
+                S_nk = np.outer(S_nk, S_nk)
+                
+                S_k += self.r[n][k]*S_nk
 
-        self.alpha_k = self.alpha_0 + self.N_k
+            self.S_barra[k] = S_k/self.N_barra[k]
 
-    def atualiza_nu_k(self) -> None:
+    def atualiza_alpha(self) -> None:
 
-        self.nu_k = self.nu_0 + self.N_k
+        self.alpha = self.alpha_0 + self.N_barra
 
-    def atualiza_kappa_k(self) -> None:
+    def atualiza_kappa(self) -> None:
 
-        self.kappa_k = self.kappa_0 + self.N_k
+        self.kappa = self.kappa_0 + self.N_barra
 
-    def atualiza_mu_k(self) -> None:
+    def atualiza_m(self) -> None:
 
-        self.mu_k = self.kappa_0*self.mu_0
+        self.m = self.N_barra.reshape((self.K, 1))*self.X_barra
 
-        self.mu_k += self.N_k[:, np.newaxis]*self.x_barra_k
+        self.m += self.kappa_0*self.mu_0
 
-        self.mu_k /= self.kappa_k[:, np.newaxis]
+        self.m /= self.kappa.reshape((self.K, 1))
 
-    def atualiza_V_k(self) -> None:
+    def atualiza_nu(self) -> None:
 
-        for k in range(self.K):
+        self.nu = self.nu_0 + self.N_barra
 
-            self.V_inv_k[k] = np.outer(self.x_barra_k[k] - self.mu_0[k], self.x_barra_k[k] - self.mu_0[k])
+    def atualiza_W(self) -> None:
 
-            self.V_inv_k[k] *= self.kappa_0*self.N_k[k]/(self.N_k[k] + self.kappa_0)
+        self.W = np.einsum('kD, kd -> kDd', self.X_barra - self.mu_0, self.X_barra - self.mu_0)
+            
+        self.W *= (self.kappa_0*self.N_barra/self.kappa).reshape((self.K, 1, 1))
 
-            self.V_inv_k[k] += self.V_inv_0 + self.N_k[k]*self.S_k[k]
+        self.W += self.N_barra.reshape((self.K, 1, 1))*self.S_barra
 
-            self.V_k[k] = np.linalg.inv(self.V_inv_k[k])
+        self.W += self.W_0.reshape((1, self.D, self.D))
 
-    def atualiza_params(self) -> None:
+    def atualiza_V(self) -> None:
 
-        # Atualiza quantidades importantes para o cálculo de outros valores
+        self.V = np.linalg.inv(self.W)
 
-        self.atualiz_E_ln_det_Lambda_k()
+    def atualiza_r(self) -> None:
 
-        self.atualiza_E_ln_pi_k()
+        self.r = -np.einsum('nd, kdd, nd -> nk', self.X, self.V, self.X)
 
-        # Atualiza responsabilidade da classe k na observação n
+        self.r += 2*np.einsum('kd, kdd, nd -> nk', self.m, self.V, self.X)
 
-        self.atualiza_r_nk()
+        self.r -= np.einsum('kd, kdd, kd -> k', self.m, self.V, self.m)
 
-        # Atualiza estatísticas suficientes da classe k
+        self.r *= self.nu/2
 
-        self.atualiza_N_k()
+        self.r -= self.D/(2*self.kappa)
 
-        self.atualiza_x_barra_k()
+        self.r += self.E_ln_det_Lambda()/2
 
-        self.atualiza_S_k()
+        self.r += self.E_ln_pi()
 
-        # Atualiza parâmetros da posteriori da classe k
+        self.r = np.exp(self.r)
 
-        self.atualiza_alpha_k()
+        self.r = self.r/self.r.sum(axis = 1).reshape((self.N, 1))
+    
+    def atualiza_modelo(self) -> None:
 
-        self.atualiza_nu_k()
+        self.atualiza_N_barra()
 
-        self.atualiza_kappa_k()
+        self.atualiza_X_barra()
 
-        self.atualiza_mu_k()
+        self.atualiza_S_barra()
 
-        self.atualiza_V_k()
+        self.atualiza_alpha()
 
-    def ajusta_modelo(self):
+        self.atualiza_kappa()
 
-        for i in range(5):
+        self.atualiza_m()
 
-            self.atualiza_params()
+        self.atualiza_nu()
 
-Dados = pd.read_csv('Modelo\\Amostra.csv', usecols = ['x_1', 'x_2'])
+        self.atualiza_W()
 
-Objetos_Teste = CAVI_GMM(Dados = np.array(Dados), K = 5)
+        self.atualiza_V()
 
-Objetos_Teste.inicializa_params_posteriori()
+        self.atualiza_r()
 
-Objetos_Teste.ajusta_modelo()
+    def ln_C_alpha_0(self) -> float:
 
-print(Objetos_Teste.mu_k)
+        ln_C_alpha_0 = spy.special.loggamma(self.alpha_0*self.K)
+
+        ln_C_alpha_0 -= self.K*spy.special.loggamma(self.alpha_0)
+
+        return ln_C_alpha_0
+    
+    def ln_C_alpha(self) -> float:
+
+        ln_C_alpha = spy.special.loggamma(self.alpha.sum())
+
+        ln_C_alpha -= spy.special.loggamma(self.alpha).sum()
+
+        return ln_C_alpha
+    
+    def ln_B_V_0_nu_0(self) -> float:
+
+        ln_B_V_0_nu_0 = (self.nu_0 - np.arange(stop = self.D))/2
+
+        ln_B_V_0_nu_0 = -spy.special.loggamma(ln_B_V_0_nu_0).sum()
+
+        ln_B_V_0_nu_0 -= self.D*(self.D - 1)/4*np.log(np.pi)
+
+        ln_B_V_0_nu_0 -= self.nu_0*self.D/2*np.log(2)
+
+        ln_B_V_0_nu_0 -= self.nu_0/2*np.log(np.linalg.det(self.V_0))
+
+        return ln_B_V_0_nu_0
+    
+    def ln_B_V_nu(self) -> np.ndarray:
+
+        ln_B_V_nu = np.add.outer(self.nu, -np.arange(stop = self.D))/2
+
+        ln_B_V_nu = -spy.special.loggamma(ln_B_V_nu).sum(axis = 1)
+
+        ln_B_V_nu -= self.D*(self.D - 1)/4*np.log(np.pi)
+
+        ln_B_V_nu -= self.nu*self.D/2*np.log(2)
+
+        ln_B_V_nu -= self.nu/2*np.log(np.linalg.det(self.V))
+
+        return ln_B_V_nu
+
+    def H_Lambda(self) -> np.ndarray:
+
+        H_Lambda = -self.ln_B_V_nu()
+
+        H_Lambda -= (self.nu - self.D - 1)/2*self.E_ln_det_Lambda()
+
+        H_Lambda += self.nu*self.D/2
+
+        return H_Lambda
+    
+    def atualiza_E_ln_p_pi(self) -> float:
+
+        E_ln_p_pi = self.ln_C_alpha_0()
+
+        E_ln_p_pi += (self.alpha_0 - 1)*self.E_ln_pi().sum()
+
+        return E_ln_p_pi
+    
+    def atualiza_E_ln_p_Z(self) -> float:
+
+        E_ln_p_Z = self.r @ self.E_ln_pi()
+
+        E_ln_p_Z = E_ln_p_Z.sum()
+
+        return E_ln_p_Z
+    
+    def atualiza_E_ln_p_mu_Lambda(self) -> float:
+
+        E_ln_p_mu_Lambda = np.einsum('kd, kdd, kd -> k', self.m - self.mu_0, self.V, self.m - self.mu_0)
+
+        E_ln_p_mu_Lambda *= -self.kappa_0*self.nu
+
+        E_ln_p_mu_Lambda = self.D*np.log(self.kappa_0/(2*np.pi))
+
+        E_ln_p_mu_Lambda += (self.nu_0 - self.D)*self.E_ln_det_Lambda()
+
+        E_ln_p_mu_Lambda -= self.D*self.kappa_0/self.kappa
+
+        E_ln_p_mu_Lambda += self.ln_B_V_0_nu_0()
+
+        E_ln_p_mu_Lambda -= self.nu*np.trace(self.W_0 @ self.V, axis1 = 1, axis2 = 2)
+
+        E_ln_p_mu_Lambda = E_ln_p_mu_Lambda.sum()/2
+
+        return E_ln_p_mu_Lambda
+
+    def atualiza_E_ln_p_X(self) -> float:
+
+        E_ln_p_X = self.E_ln_det_Lambda()
+
+        E_ln_p_X -= self.D/self.kappa
+
+        E_ln_p_X -= self.nu*np.trace(self.S_barra @ self.V, axis1 = 1, axis2 = 2)
+
+        E_ln_p_X -= self.nu*np.einsum('kd, kdd, kd -> k', self.X_barra - self.m, self.V, self.X_barra - self.m)
+
+        E_ln_p_X -= self.D*np.log(2*np.pi)
+
+        E_ln_p_X *= self.N_barra
+
+        E_ln_p_X = E_ln_p_X.sum()/2
+
+        return E_ln_p_X
+    
+    def atualiza_E_ln_q_pi(self) -> float:
+
+        E_ln_q_pi = (self.alpha - 1)*self.E_ln_pi()
+
+        E_ln_q_pi += self.ln_C_alpha()
+
+        E_ln_q_pi = E_ln_q_pi.sum()
+
+        return E_ln_q_pi
+    
+    def atualiza_E_ln_q_Z(self) -> float:
+
+        E_ln_q_Z = self.r*np.log(self.r)
+
+        E_ln_q_Z = E_ln_q_Z.sum()
+
+        return E_ln_q_Z
+    
+    def atualiza_E_ln_q_mu_Lambda(self) -> float:
+
+        E_ln_q_mu_Lambda = self.E_ln_det_Lambda()/2
+
+        E_ln_q_mu_Lambda += self.D/2*np.log(self.kappa/(2*np.pi))
+
+        E_ln_q_mu_Lambda -= self.D/2
+
+        E_ln_q_mu_Lambda -= self.H_Lambda()
+
+        E_ln_q_mu_Lambda = E_ln_q_mu_Lambda.sum()
+
+        return E_ln_q_mu_Lambda
+    
+    def atualiza_ELBO(self) -> float:
+
+        ELBO = self.atualiza_E_ln_p_pi()
+
+        ELBO += self.atualiza_E_ln_p_Z()
+
+        ELBO += self.atualiza_E_ln_p_mu_Lambda()
+
+        ELBO += self.atualiza_E_ln_p_X()
+
+        ELBO += self.atualiza_E_ln_q_pi()
+
+        ELBO += self.atualiza_E_ln_q_Z()
+
+        ELBO += self.atualiza_E_ln_q_mu_Lambda()
+
+        return ELBO
+    
+    def estima_pi(self) -> None:
+
+        self.pi = self.alpha/self.alpha.sum()
+
+    def estima_Z(self) -> None:
+
+        self.Z = np.argmax(self.r, axis = 1)
+
+    def estima_mu(self) -> None:
+
+        self.mu = self.m
+
+    def estima_Sigma(self) -> None:
+
+        self.Sigma = self.W
+        
+        self.Sigma /= (self.nu - self.D - 1).reshape((self.K, 1, 1))
+
+    def estima_Lambda(self) -> None:
+
+        self.Lambda = self.V
+
+        self.Lambda *= self.nu.reshape((self.K, 1, 1))
+
+    def estima_modelo(self) -> None:
+
+        self.estima_pi()
+        
+        self.estima_Z()
+
+        self.estima_mu()
+
+        self.estima_Sigma()
+
+        self.estima_Lambda()
+
+    def ajusta_modelo(self, max: int = 1000, tol: float = 1e-6) -> None:
+
+        self.inicializa_modelo()
+
+        self.atualiza_modelo()
+
+        self.ELBO.append(self.atualiza_ELBO())
+
+        for i in range(max):
+
+            dif_atualizacao = self.ELBO[-1]
+
+            self.atualiza_modelo()
+
+            self.ELBO.append(self.atualiza_ELBO())
+
+            dif_atualizacao -= self.ELBO[-1]
+
+            if np.abs(dif_atualizacao) < tol:
+
+                break
+
+        self.estima_modelo()
