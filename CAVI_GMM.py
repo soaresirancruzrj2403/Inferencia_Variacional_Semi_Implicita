@@ -409,15 +409,11 @@ class CAVI_GMM:
 
         for i in range(max):
 
-            dif_atualizacao = self.ELBO[-1]
-
             self.atualiza_modelo()
 
             self.ELBO.append(self.atualiza_ELBO())
 
-            dif_atualizacao -= self.ELBO[-1]
-
-            if np.abs(dif_atualizacao) < tol:
+            if np.abs(self.ELBO[-1] - self.ELBO[-2]) < tol:
 
                 break
 
