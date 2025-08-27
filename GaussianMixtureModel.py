@@ -7,6 +7,8 @@ from sklearn.cluster import kmeans_plusplus
 
 from scipy.special import softmax
 
+from scipy.special import loggamma
+
 from scipy.stats import multivariate_t
 
 class GaussianMixtureModel:
@@ -99,15 +101,15 @@ class GaussianMixtureModel:
 
     def update_gamma(self) -> None:
 
-        for m in range(self.M):
+        for mu in range(self.M):
 
             for n in range(self.N):
 
-                self.gamma[n, m] = self.E_log_pi[m]
+                self.gamma[n, mu] = self.E_log_pi[mu]
 
-                self.gamma[n, m] += self.E_log_det_Lambda[m]
+                self.gamma[n, mu] += self.E_log_det_Lambda[mu]
 
-                self.gamma[n, m] -= (self.nu[m]*(self.X[n] - self.mu[m]).T @ self.Psi[m] @ (self.X[n] - self.mu[m]) + self.D/self.tau[m])/2
+                self.gamma[n, mu] -= (self.nu[mu]*(self.X[n] - self.mu[mu]).T @ self.Psi[mu] @ (self.X[n] - self.mu[mu]) + self.D/self.tau[mu])/2
 
         self.gamma = softmax(self.gamma, axis = 1)
 
@@ -125,13 +127,13 @@ class GaussianMixtureModel:
 
         self.S_barra.fill(0)
 
-        for m in range(self.M):
+        for mu in range(self.M):
 
             for n in range(self.N):
 
-                self.S_barra[m] += self.gamma[n, m]*np.outer(self.X[n] - self.X_barra[m], self.X[n] - self.X_barra[m])
+                self.S_barra[mu] += self.gamma[n, mu]*np.outer(self.X[n] - self.X_barra[mu], self.X[n] - self.X_barra[mu])
 
-            self.S_barra[m] /= self.N_barra[m]
+            self.S_barra[mu] /= self.N_barra[mu]
 
     def update_alpha(self) -> None:
 
@@ -155,13 +157,13 @@ class GaussianMixtureModel:
 
     def update_Phi(self) -> None:
 
-        for m in range(self.M):
+        for mu in range(self.M):
 
-            self.Phi[m] = self.Sigma_0
+            self.Phi[mu] = self.Sigma_0
 
-            self.Phi[m] += self.N_barra[m]*self.S_barra[m]
+            self.Phi[mu] += self.N_barra[mu]*self.S_barra[mu]
 
-            self.Phi[m] += self.tau_0*self.N_barra[m]/self.tau[m]*np.outer(self.X_barra[m] - self.mu_0, self.X_barra[m] - self.mu_0)
+            self.Phi[mu] += self.tau_0*self.N_barra[mu]/self.tau[mu]*np.outer(self.X_barra[mu] - self.mu_0, self.X_barra[mu] - self.mu_0)
 
     def update_Psi(self) -> None:
 
@@ -239,21 +241,179 @@ class GaussianMixtureModel:
 
         self.estimates_parameters()
 
+    def ln_C_alpha_0(self) -> float:
+
+        ln_C_alpha_0 = loggamma(self.alpha_0*self.M)
+
+        ln_C_alpha_0 -= self.M*loggamma(self.alpha_0)
+
+        return ln_C_alpha_0
+    
+    def ln_C_alpha(self) -> float:
+
+        ln_C_alpha = loggamma(self.alpha.sum())
+
+        ln_C_alpha -= loggamma(self.alpha).sum()
+
+        return ln_C_alpha
+    
+    def ln_B_V_0_nu_0(self) -> float:
+
+        ln_B_V_0_nu_0 = (self.nu_0 - np.arange(stop = self.D))/2
+
+        ln_B_V_0_nu_0 = -loggamma(ln_B_V_0_nu_0).sum()
+
+        ln_B_V_0_nu_0 -= self.D*(self.D - 1)/4*np.log(np.pi)
+
+        ln_B_V_0_nu_0 -= self.nu_0*self.D/2*np.log(2)
+
+        ln_B_V_0_nu_0 -= self.nu_0/2*np.log(np.linalg.det(self.Lambda_0))
+
+        return ln_B_V_0_nu_0
+    
+    def ln_B_V_nu(self) -> np.ndarray:
+
+        ln_B_V_nu = np.add.outer(self.nu, -np.arange(stop = self.D))/2
+
+        ln_B_V_nu = -loggamma(ln_B_V_nu).sum(axis = 1)
+
+        ln_B_V_nu -= self.D*(self.D - 1)/4*np.log(np.pi)
+
+        ln_B_V_nu -= self.nu*self.D/2*np.log(2)
+
+        ln_B_V_nu -= self.nu/2*np.log(np.linalg.det(self.Psi))
+
+        return ln_B_V_nu
+
+    def H_Lambda(self) -> np.ndarray:
+
+        H_Lambda = -self.ln_B_V_nu()
+
+        H_Lambda -= (self.nu - self.D - 1)/2*self.E_log_det_Lambda
+
+        H_Lambda += self.nu*self.D/2
+
+        return H_Lambda
+    
+    def atualiza_E_ln_p_pi(self) -> float:
+
+        E_ln_p_pi = self.ln_C_alpha_0()
+
+        E_ln_p_pi += (self.alpha_0 - 1)*self.E_log_pi.sum()
+
+        return E_ln_p_pi
+    
+    def atualiza_E_ln_p_Z(self) -> float:
+
+        E_ln_p_Z = self.gamma @ self.E_log_pi
+
+        E_ln_p_Z = E_ln_p_Z.sum()
+
+        return E_ln_p_Z
+    
+    def atualiza_E_ln_p_mu_Lambda(self) -> float:
+
+        E_ln_p_mu_Lambda = np.einsum('kd, kdd, kd -> k', self.mu - self.mu_0, self.Psi, self.mu - self.mu_0)
+
+        E_ln_p_mu_Lambda *= -self.tau_0*self.nu
+
+        E_ln_p_mu_Lambda = self.D*np.log(self.tau_0/(2*np.pi))
+
+        E_ln_p_mu_Lambda += (self.nu_0 - self.D)*self.E_log_det_Lambda
+
+        E_ln_p_mu_Lambda -= self.D*self.tau_0/self.tau
+
+        E_ln_p_mu_Lambda += self.ln_B_V_0_nu_0()
+
+        E_ln_p_mu_Lambda -= self.nu*np.trace(self.Sigma_0 @ self.Psi, axis1 = 1, axis2 = 2)
+
+        E_ln_p_mu_Lambda = E_ln_p_mu_Lambda.sum()/2
+
+        return E_ln_p_mu_Lambda
+
+    def atualiza_E_ln_p_X(self) -> float:
+
+        E_ln_p_X = self.E_log_det_Lambda
+
+        E_ln_p_X -= self.D/self.tau
+
+        E_ln_p_X -= self.nu*np.trace(self.S_barra @ self.Psi, axis1 = 1, axis2 = 2)
+
+        E_ln_p_X -= self.nu*np.einsum('kd, kdd, kd -> k', self.X_barra - self.mu, self.Psi, self.X_barra - self.mu)
+
+        E_ln_p_X -= self.D*np.log(2*np.pi)
+
+        E_ln_p_X *= self.N_barra
+
+        E_ln_p_X = E_ln_p_X.sum()/2
+
+        return E_ln_p_X
+    
+    def atualiza_E_ln_q_pi(self) -> float:
+
+        E_ln_q_pi = (self.alpha - 1)*self.E_log_pi
+
+        E_ln_q_pi += self.ln_C_alpha()
+
+        E_ln_q_pi = E_ln_q_pi.sum()
+
+        return E_ln_q_pi
+    
+    def atualiza_E_ln_q_Z(self) -> float:
+
+        E_ln_q_Z = self.gamma*np.log(self.gamma)
+
+        E_ln_q_Z = E_ln_q_Z.sum()
+
+        return E_ln_q_Z
+    
+    def atualiza_E_ln_q_mu_Lambda(self) -> float:
+
+        E_ln_q_mu_Lambda = self.E_log_det_Lambda/2
+
+        E_ln_q_mu_Lambda += self.D/2*np.log(self.tau/(2*np.pi))
+
+        E_ln_q_mu_Lambda -= self.D/2
+
+        E_ln_q_mu_Lambda -= self.H_Lambda()
+
+        E_ln_q_mu_Lambda = E_ln_q_mu_Lambda.sum()
+
+        return E_ln_q_mu_Lambda
+    
+    def atualiza_ELBO(self) -> float:
+
+        ELBO = self.atualiza_E_ln_p_pi()
+
+        ELBO += self.atualiza_E_ln_p_Z()
+
+        ELBO += self.atualiza_E_ln_p_mu_Lambda()
+
+        ELBO += self.atualiza_E_ln_p_X()
+
+        ELBO += self.atualiza_E_ln_q_pi()
+
+        ELBO += self.atualiza_E_ln_q_Z()
+
+        ELBO += self.atualiza_E_ln_q_mu_Lambda()
+
+        return ELBO
+
     def predictive_distribution(self, X) -> None:
 
         density = 0
 
-        for m in range(self.M):
+        for mu in range(self.M):
 
-            density += self.pi[m]*multivariate_t.pdf(
+            density += self.pi[mu]*multivariate_t.pdf(
 
                 x = X,
 
-                loc = self.mu[m],
+                loc = self.mu[mu],
 
-                df = self.nu[m] + 1 - self.D,
+                df = self.nu[mu] + 1 - self.D,
 
-                shape = (1 + self.tau[m])/(self.tau[m]*(self.nu[m] + 1 - self.D))*self.Phi[m]
+                shape = (1 + self.tau[mu])/(self.tau[mu]*(self.nu[mu] + 1 - self.D))*self.Phi[mu]
 
             )
 
